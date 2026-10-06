@@ -27,17 +27,52 @@ locked 标记。只允许修改未锁定位置的字符，使整串成为类型�
 一维 d ∈ {0, 1} 表示区间内是否已删除，被删位置的原稿下标随状态
 携带，因此配对与改动清单都能回指原稿坐标，而不必事后猜测删了哪一位。
 并列时先取修复串字典序最小，再取被删下标最小。
+
+歧义核查变体（repair_candidates / repair_redundant_candidates）：
+审核员在接受自动修复前需要知道最小修改方案是否唯一。两个函数在同一
+区间 DP 框架上把每个状态的"最优一个候选"换成"最小代价下按 key 升序的
+前两个互异候选"，从而给出全局前两个互异方案与"唯一／存在备选"结论。
+key 对普通修复是修复串本身，对赘余变体是 (修复串, 被删下标)——结果串
+相同但删除的原稿位置不同算两个互异方案。这不是先求出旧首解再局部改
+一个字符的事后修补，而是 DP 的每个状态都保留足够的候选信息；子区间
+全体候选的组合中，前两名互异者必然落在两侧各自前二的组合里（任一
+用到第三名之外候选的组合，都有至少两个互异组合严格不劣于它），因此
+每状态保留两个候选不会丢失全局前二。不同解析路径产生的同一结果经
+去重只计一次，不会被当成"备选"。
 """
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
 PAIRS = (("(", ")"), ("[", "]"), ("{", "}"))
 
 # (cost, text)；cost 为 None 表示该区间不可修复
 State = Tuple[Optional[int], Optional[str]]
+
+
+def _pairs_of(text: str, deleted: int = -1) -> list:
+    """由修复串重建配对下标（栈式扫描，与 DP 结构一致），按开括号下标升序。
+
+    deleted >= 0 时把修复串坐标映射回原稿坐标：跳过被删位置（单调映射，
+    保序），因此配对一律回指原稿。
+    """
+    pairs = []
+    stack: list[int] = []
+    for idx, ch in enumerate(text):
+        if ch in OPEN_TO_CLOSE:
+            stack.append(idx)
+        else:
+            o = stack.pop()
+            if deleted >= 0:
+                o = o + 1 if o >= deleted else o
+                c = idx + 1 if idx >= deleted else idx
+            else:
+                c = idx
+            pairs.append([o, c])
+    pairs.sort()
+    return pairs
 
 
 def repair(chars: Sequence[str], locked: Sequence[bool]) -> Optional[Tuple[str, list]]:
@@ -87,18 +122,7 @@ def repair(chars: Sequence[str], locked: Sequence[bool]) -> Optional[Tuple[str, 
         return None
 
     result = dp[0][n][1]
-
-    # 依据修复结果重建配对下标（栈式扫描，与 DP 结构一致）
-    pairs = []
-    stack: list[int] = []
-    for idx, ch in enumerate(result):
-        if ch in OPEN_TO_CLOSE:
-            stack.append(idx)
-        else:
-            pairs.append([stack.pop(), idx])
-    pairs.sort()
-
-    return result, pairs
+    return result, _pairs_of(result)
 
 
 def repair_redundant(
@@ -168,18 +192,172 @@ def repair_redundant(
         return None
     _, text, deleted = root
 
-    def to_orig(p: int) -> int:
-        # 修复串坐标 -> 原稿坐标：跳过被删位置（单调映射，保序）
-        return p + 1 if deleted >= 0 and p >= deleted else p
+    # 配对下标由修复串重建，再映射回原稿坐标
+    return text, _pairs_of(text, deleted), (deleted if deleted >= 0 else None)
 
-    # 依据修复结果重建配对下标（栈式扫描），再映射回原稿坐标
-    pairs = []
-    stack: list[int] = []
-    for idx, ch in enumerate(text):
-        if ch in OPEN_TO_CLOSE:
-            stack.append(idx)
-        else:
-            pairs.append([to_orig(stack.pop()), to_orig(idx)])
-    pairs.sort()
 
-    return text, pairs, (deleted if deleted >= 0 else None)
+class _Top2:
+    """单状态候选收集器：记录最小代价，及该代价下按 key 升序的前两个互异 key。
+
+    不同解析路径产生的同一 key 只保留一次（去重），保证"前二"是两个
+    真正互异的方案，而不是同一结果的两条推导。
+    """
+
+    __slots__ = ("cost", "keys")
+
+    def __init__(self) -> None:
+        self.cost: Optional[int] = None
+        self.keys: list = []
+
+    def add(self, cost: int, key) -> None:
+        if self.cost is None or cost < self.cost:
+            self.cost = cost
+            self.keys = [key]
+        elif cost == self.cost and key not in self.keys:
+            self.keys.append(key)
+            self.keys.sort()
+            del self.keys[2:]
+
+
+def repair_candidates(
+    chars: Sequence[str], locked: Sequence[bool]
+) -> Optional[List[Tuple[str, list]]]:
+    """歧义核查：最小修改数下按字典序排列的前两个互异修复方案。
+
+    与 repair() 同一区间 DP 框架，但每个状态保留最小代价下字典序前二的
+    互异修复串，而非只保留最优者。全局前二必可由子状态前二组合得到
+    （见模块 docstring），因此不会退化成"固定首解再局部改一个字符"。
+
+    返回 [(修复串, 配对下标), ...]，按字典序升序；长度 1 表示方案唯一，
+    长度 2 表示存在备选。无解返回 None。
+    """
+    n = len(chars)
+    if n == 0:
+        return [("", [])]
+    if n % 2 != 0:
+        return None
+
+    # dp[i][j]：区间 [i, j) 的 _Top2（仅偶数长度区间可达），不可达为 None
+    dp: list = [[None] * (n + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        t = _Top2()
+        t.add(0, "")
+        dp[i][i] = t
+
+    for length in range(2, n + 1, 2):
+        for i in range(n + 1 - length):
+            j = i + length
+            acc = _Top2()
+            for k in range(i + 1, j, 2):
+                left = dp[i + 1][k]
+                right = dp[k + 1][j]
+                if left is None or right is None:
+                    continue
+                base = left.cost + right.cost
+                lkeys, rkeys = left.keys, right.keys
+                for oc, cc in PAIRS:
+                    if locked[i] and chars[i] != oc:
+                        continue
+                    if locked[k] and chars[k] != cc:
+                        continue
+                    cost = base + (chars[i] != oc) + (chars[k] != cc)
+                    if acc.cost is not None and cost > acc.cost:
+                        continue  # 该转移已不可能进入前二，跳过拼串
+                    # (次优左, 次优右) 不优于 (最优左, 次优右) 与
+                    # (次优左, 最优右) 中的任何一个，必不在前二，无需构造
+                    acc.add(cost, oc + lkeys[0] + cc + rkeys[0])
+                    if len(lkeys) > 1:
+                        acc.add(cost, oc + lkeys[1] + cc + rkeys[0])
+                    if len(rkeys) > 1:
+                        acc.add(cost, oc + lkeys[0] + cc + rkeys[1])
+            dp[i][j] = acc if acc.cost is not None else None
+
+    root = dp[0][n]
+    if root is None:
+        return None
+    return [(text, _pairs_of(text)) for text in root.keys]
+
+
+def repair_redundant_candidates(
+    chars: Sequence[str], locked: Sequence[bool]
+) -> Optional[List[Tuple[str, list, Optional[int]]]]:
+    """单赘余标记修复的歧义核查：前两个互异方案。
+
+    互异按 (修复串, 被删下标) 判定：结果串相同但删除的原稿位置不同算
+    两个方案，必须分别列出。排序键为 (修复串字典序, 被删下标)，与
+    repair_redundant 的裁决顺序一致。状态 dp[d][i][j] 保留最小代价下
+    按 key 升序的前两个互异 key，正确性论证同 repair_candidates。
+
+    返回 [(修复串, 配对下标, 被删下标或 None), ...]，一律原稿坐标；
+    长度 1 唯一、长度 2 存在备选。无解返回 None。
+    """
+    n = len(chars)
+    if n == 0:
+        return [("", [], None)]
+
+    # dp[d][i][j]：区间 [i, j) 恰好删除 d 个位置的 _Top2，key 为
+    # (修复串, 被删下标)，d=0 时被删下标恒为 -1；不可达为 None
+    dp: list = [[[None] * (n + 1) for _ in range(n + 1)] for _ in range(2)]
+    for i in range(n + 1):
+        t = _Top2()
+        t.add(0, ("", -1))
+        dp[0][i][i] = t
+
+    for length in range(1, n + 1):
+        d = length % 2
+        for i in range(n + 1 - length):
+            j = i + length
+            acc = _Top2()
+            # 配对转移：位置 i 与 k 配成一对，删除（若 d=1）落在某一侧
+            for k in range(i + 1, j):
+                for dl in ((0, 1) if d else (0,)):
+                    left = dp[dl][i + 1][k]
+                    right = dp[d - dl][k + 1][j]
+                    if left is None or right is None:
+                        continue
+                    base = left.cost + right.cost
+                    lkeys, rkeys = left.keys, right.keys
+                    for oc, cc in PAIRS:
+                        if locked[i] and chars[i] != oc:
+                            continue
+                        if locked[k] and chars[k] != cc:
+                            continue
+                        cost = base + (chars[i] != oc) + (chars[k] != cc)
+                        if acc.cost is not None and cost > acc.cost:
+                            continue  # 该转移已不可能进入前二，跳过拼串
+                        # 同 repair_candidates：(次优, 次优) 组合必不在前二
+                        cand = [(lkeys[0], rkeys[0])]
+                        if len(lkeys) > 1:
+                            cand.append((lkeys[1], rkeys[0]))
+                        if len(rkeys) > 1:
+                            cand.append((lkeys[0], rkeys[1]))
+                        for (lt, ld), (rt, rd) in cand:
+                            acc.add(cost, (oc + lt + cc + rt, ld if dl else rd))
+            if d:
+                # 删除转移：直接删掉未锁定的 m（计 1 次），两侧各自平衡
+                for m in range(i, j, 2):
+                    if locked[m]:
+                        continue
+                    left = dp[0][i][m]
+                    right = dp[0][m + 1][j]
+                    if left is None or right is None:
+                        continue
+                    cost = 1 + left.cost + right.cost
+                    if acc.cost is not None and cost > acc.cost:
+                        continue
+                    cand = [(left.keys[0], right.keys[0])]
+                    if len(left.keys) > 1:
+                        cand.append((left.keys[1], right.keys[0]))
+                    if len(right.keys) > 1:
+                        cand.append((left.keys[0], right.keys[1]))
+                    for (lt, _), (rt, _) in cand:
+                        acc.add(cost, (lt + rt, m))
+            dp[d][i][j] = acc if acc.cost is not None else None
+
+    root = dp[n % 2][0][n]
+    if root is None:
+        return None
+    return [
+        (text, _pairs_of(text, deleted), (deleted if deleted >= 0 else None))
+        for text, deleted in root.keys
+    ]

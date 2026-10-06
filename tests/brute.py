@@ -5,6 +5,10 @@
 
 brute_force_redundant：单个赘余标记变体，额外枚举被删除的位置，
 按 (修改数, 修复串字典序, 被删下标) 取最优。
+
+brute_force_top2 / brute_force_redundant_top2：歧义核查对拍用，返回
+最小修改数下前两个互异方案（普通修复按修复串互异；赘余变体按
+(修复串, 被删下标) 互异——同串不同删位算两个方案）。
 """
 
 from __future__ import annotations
@@ -97,3 +101,72 @@ def brute_force_redundant(
         return None
     cost, text, m = best
     return text, cost, (m if m >= 0 else None)
+
+
+def _replace_cost(chars, locked, kept, target) -> Optional[int]:
+    """target 与 kept 位置逐位比对的替换代价；违反锁定时返回 None。"""
+    cost = 0
+    for p, i in enumerate(kept):
+        if target[p] != chars[i]:
+            if locked[i]:
+                return None
+            cost += 1
+    return cost
+
+
+def brute_force_top2(
+    chars: Sequence[str], locked: Sequence[bool]
+) -> Optional[List[Tuple[str, int]]]:
+    """前两个互异修复串：[(修复串, 修改数), ...]，按字典序升序。
+
+    长度 1 表示方案唯一；无解返回 None。
+    """
+    n = len(chars)
+    best_cost: Optional[int] = None
+    texts: List[str] = []
+    kept = list(range(n))
+    for target in all_balanced(n):
+        cost = _replace_cost(chars, locked, kept, target)
+        if cost is None:
+            continue
+        if best_cost is None or cost < best_cost:
+            best_cost = cost
+            texts = [target]
+        elif cost == best_cost:
+            texts.append(target)
+    if best_cost is None:
+        return None
+    uniq = sorted(set(texts))  # 同一结果不重复计数
+    return [(t, best_cost) for t in uniq[:2]]
+
+
+def brute_force_redundant_top2(
+    chars: Sequence[str], locked: Sequence[bool]
+) -> Optional[List[Tuple[str, int, Optional[int]]]]:
+    """前两个互异 (修复串, 被删下标) 方案：[(修复串, 修改数, 删位或 None), ...]。
+
+    同串不同删位算两个互异方案；按 (修复串字典序, 被删下标) 升序。
+    长度 1 表示方案唯一；无解返回 None。
+    """
+    n = len(chars)
+    best_cost: Optional[int] = None
+    sols: List[Tuple[str, int]] = []
+    deletions = (-1,) if n % 2 == 0 else range(n)
+    for m in deletions:
+        if m >= 0 and locked[m]:
+            continue
+        kept = [i for i in range(n) if i != m]
+        for target in all_balanced(len(kept)):
+            cost = _replace_cost(chars, locked, kept, target)
+            if cost is None:
+                continue
+            total = cost + (m >= 0)
+            if best_cost is None or total < best_cost:
+                best_cost = total
+                sols = [(target, m)]
+            elif total == best_cost:
+                sols.append((target, m))
+    if best_cost is None:
+        return None
+    uniq = sorted(set(sols))  # 同一 (串, 删位) 不重复计数
+    return [(t, best_cost, (m if m >= 0 else None)) for t, m in uniq[:2]]
