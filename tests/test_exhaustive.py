@@ -8,18 +8,20 @@ import random
 import pytest
 
 from app.repair import OPEN_TO_CLOSE, repair
-from tests.brute import brute_force
+from tests.brute import brute_force_plans
 
 CHARS = "()[]{}"
 
 
 def check_case(chars, locked):
-    expected = brute_force(chars, locked)
+    expected_plans = brute_force_plans(chars, locked)
     got = repair(chars, locked)
-    if expected is None:
+    ambiguous = repair(chars, locked, check_ambiguity=True)
+    if not expected_plans:
         assert got is None, f"{chars=} {locked=} 应无解，DP 给出 {got}"
+        assert ambiguous is None, f"{chars=} {locked=} 应无解，歧义核查伪造备选"
         return
-    exp_text, exp_cost = expected
+    exp_cost, exp_text = expected_plans[0]
     assert got is not None, f"{chars=} {locked=} 应有解 {exp_text}，DP 返回 None"
     text, pairs = got
     assert text == exp_text, (
@@ -46,6 +48,33 @@ def check_case(chars, locked):
     assert pairs == sorted(derived)
     # pairs 恰好覆盖全部位置
     assert sorted(p for pair in pairs for p in pair) == list(range(len(chars)))
+
+    first_text, first_pairs, plans = ambiguous
+    assert first_text == text
+    assert first_pairs == pairs
+    assert len(plans) == len(expected_plans)
+    assert [plan["repaired"] for plan in plans] == [
+        plan_text for _, plan_text in expected_plans
+    ]
+    assert all(plan["cost"] == exp_cost for plan in plans)
+    assert len({plan["repaired"] for plan in plans}) == len(plans)
+    for plan, (plan_cost, plan_text) in zip(plans, expected_plans):
+        assert plan["repaired"] == plan_text
+        assert plan["cost"] == plan_cost
+        stack = []
+        derived = []
+        for idx, ch in enumerate(plan_text):
+            if ch in OPEN_TO_CLOSE:
+                stack.append(idx)
+            else:
+                o = stack.pop()
+                assert OPEN_TO_CLOSE[plan_text[o]] == ch
+                derived.append([o, idx])
+        assert not stack
+        assert plan["pairs"] == sorted(derived)
+        for i, lk in enumerate(locked):
+            if lk:
+                assert plan_text[i] == chars[i]
 
 
 @pytest.mark.parametrize("n", [2, 4])

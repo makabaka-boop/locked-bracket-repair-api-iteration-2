@@ -8,10 +8,10 @@ import time
 from app.repair import repair
 
 
-def run(s, locked=None):
+def run(s, locked=None, check_ambiguity=False):
     n = len(s)
     locked = locked if locked is not None else [False] * n
-    return repair(list(s), list(locked))
+    return repair(list(s), list(locked), check_ambiguity=check_ambiguity)
 
 
 class TestAllLocked:
@@ -104,6 +104,44 @@ class TestLockedPreserved:
     def test_locked_close_at_first_position_no_repair(self):
         # 首位锁定为闭括号：任何合法串首位必是开括号 => 无解
         assert run("))))))", [True] + [False] * 5) is None
+
+
+class TestAmbiguity:
+    def test_unique_plan(self):
+        # 两个位置都与最优的 "()" 相同：不存在同成本备选
+        _, _, plans = run("()", check_ambiguity=True)
+        assert plans == [
+            {"cost": 0, "repaired": "()", "pairs": [[0, 1]]}
+        ]
+
+    def test_two_minimal_results(self):
+        # "(())" 与 "()[]" 均改 2 处；按结果串字典序返回
+        _, _, plans = run("([)]", check_ambiguity=True)
+        assert [plan["repaired"] for plan in plans] == ["(())", "()[]"]
+        assert [plan["pairs"] for plan in plans] == [
+            [[0, 3], [1, 2]],
+            [[0, 1], [2, 3]],
+        ]
+        assert {plan["cost"] for plan in plans} == {2}
+        assert len({plan["repaired"] for plan in plans}) == 2
+
+    def test_locked_removes_alternative(self):
+        # 锁定下标 1 为 "(" 后，其他最小结构都会触碰锁定位，只剩 "(())"
+        _, _, plans = repair(
+            list("(((["),
+            [False, True, False, False],
+            check_ambiguity=True,
+        )
+        assert [plan["repaired"] for plan in plans] == ["(())"]
+        assert plans[0]["pairs"] == [[0, 3], [1, 2]]
+
+    def test_no_repair_has_no_alternative(self):
+        assert repair(list("(("), [True, True], check_ambiguity=True) is None
+
+    def test_disabled_interface_stays_unchanged(self):
+        outcome = run("([)]")
+        assert len(outcome) == 2
+        assert outcome[0] == "(())"
 
 
 class TestPerformance:

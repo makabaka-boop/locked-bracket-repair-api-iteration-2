@@ -80,6 +80,146 @@ class TestOK:
         assert client.get("/health").json() == {"status": "ok"}
 
 
+class TestAmbiguity:
+    def test_disabled_response_is_unchanged(self):
+        data = post({"tokens": [
+            {"char": "(", "locked": False},
+            {"char": "]", "locked": False},
+        ], "checkAmbiguity": False}).json()
+        assert data == {
+            "status": "OK",
+            "repaired": "()",
+            "pairs": [[0, 1]],
+            "changes": [
+                {"index": 1, "before": "]", "after": ")"}
+            ],
+        }
+        assert "ambiguity" not in data
+
+    def test_unique_response(self):
+        data = post({"checkAmbiguity": True, "tokens": [
+            {"char": "(", "locked": True},
+            {"char": ")", "locked": True},
+        ]}).json()
+        assert data == {
+            "status": "OK",
+            "repaired": "()",
+            "pairs": [[0, 1]],
+            "changes": [],
+            "ambiguity": {"status": "UNIQUE", "alternatives": []},
+        }
+
+    def test_alternative_response(self):
+        data = post({"checkAmbiguity": True, "tokens": [
+            {"char": "(", "locked": False},
+            {"char": "[", "locked": False},
+            {"char": ")", "locked": False},
+            {"char": "]", "locked": False},
+        ]}).json()
+        assert data["repaired"] == "(())"
+        assert data["pairs"] == [[0, 3], [1, 2]]
+        assert data["ambiguity"]["status"] == "ALTERNATIVE_EXISTS"
+        assert data["ambiguity"]["alternatives"] == [
+            {
+                "repaired": "()[]",
+                "pairs": [[0, 1], [2, 3]],
+                "changes": [
+                    {"index": 1, "before": "[", "after": ")"},
+                    {"index": 2, "before": ")", "after": "["},
+                ],
+            }
+        ]
+
+    def test_no_repair_response_unchanged_even_when_enabled(self):
+        data = post({"checkAmbiguity": True, "tokens": [
+            {"char": "(", "locked": True},
+            {"char": "(", "locked": True},
+        ]}).json()
+        assert data == {
+            "status": "NO_REPAIR",
+            "repaired": None,
+            "pairs": None,
+            "changes": None,
+        }
+
+    def test_check_flag_must_be_bool(self):
+        r = post({"checkAmbiguity": 1, "tokens": [
+            {"char": "(", "locked": False},
+            {"char": ")", "locked": False},
+        ]})
+        assert r.status_code == 422
+
+    def test_redundant_same_text_different_delete_positions(self):
+        data = post_redundant({"checkAmbiguity": True, "tokens": [
+            {"char": "(", "locked": False},
+            {"char": "(", "locked": False},
+            {"char": ")", "locked": False},
+        ]}).json()
+        assert data["repaired"] == "()"
+        assert data["deletedIndex"] == 0
+        assert data["pairs"] == [[1, 2]]
+        assert data["ambiguity"]["status"] == "ALTERNATIVE_EXISTS"
+        assert data["ambiguity"]["alternatives"] == [
+            {
+                "repaired": "()",
+                "pairs": [[0, 2]],
+                "changes": [],
+                "deletedIndex": 1,
+            }
+        ]
+
+    def test_redundant_alternatives_carry_replacement_origin(self):
+        # "((("：删 0 或删 1 都改一次得到 "()"；两种方案的替换原稿位不同
+        data = post_redundant({"checkAmbiguity": True, "tokens": [
+            {"char": "(", "locked": False},
+            {"char": "(", "locked": False},
+            {"char": "(", "locked": False},
+        ]}).json()
+        assert data["deletedIndex"] == 0
+        assert data["changes"] == [
+            {"index": 1, "before": "(", "after": ")"}
+        ]
+        assert data["pairs"] == [[1, 2]]
+        assert data["ambiguity"]["alternatives"] == [
+            {
+                "repaired": "()",
+                "pairs": [[0, 2]],
+                "changes": [
+                    {"index": 2, "before": "(", "after": ")"}
+                ],
+                "deletedIndex": 1,
+            }
+        ]
+
+    def test_redundant_unique_and_locked_conflict(self):
+        data = post_redundant({"checkAmbiguity": True, "tokens": [
+            {"char": "(", "locked": True},
+            {"char": "(", "locked": False},
+            {"char": ")", "locked": False},
+        ]}).json()
+        assert data["ambiguity"] == {
+            "status": "UNIQUE",
+            "alternatives": [],
+        }
+        assert data["deletedIndex"] == 1
+        assert data["pairs"] == [[0, 2]]
+
+    def test_redundant_disabled_response_is_unchanged(self):
+        data = post_redundant({"tokens": [
+            {"char": "(", "locked": False},
+            {"char": "(", "locked": False},
+            {"char": ")", "locked": False},
+        ], "checkAmbiguity": False}).json()
+        assert data == {
+            "status": "OK",
+            "repaired": "()",
+            "pairs": [[1, 2]],
+            "changes": [],
+            "deletedIndex": 0,
+        }
+        assert "ambiguity" not in data
+
+
 class Test422:
     def _expect_422(self, body):
         r = post(body)

@@ -9,25 +9,30 @@ import time
 import pytest
 
 from app.repair import OPEN_TO_CLOSE, repair, repair_redundant
-from tests.brute import brute_force_redundant
+from tests.brute import brute_force_redundant_plans
 
 CHARS = "()[]{}"
 
 
-def run(s, locked=None):
+def run(s, locked=None, check_ambiguity=False):
     n = len(s)
     locked = locked if locked is not None else [False] * n
-    return repair_redundant(list(s), list(locked))
+    return repair_redundant(
+        list(s), list(locked), check_ambiguity=check_ambiguity
+    )
 
 
 def check_case(chars, locked):
     n = len(chars)
-    expected = brute_force_redundant(chars, locked)
+    expected_plans = brute_force_redundant_plans(chars, locked)
     got = repair_redundant(chars, locked)
-    if expected is None:
+    ambiguous = repair_redundant(chars, locked, check_ambiguity=True)
+    if not expected_plans:
         assert got is None, f"{chars=} {locked=} 应无解，DP 给出 {got}"
+        assert ambiguous is None, f"{chars=} {locked=} 应无解，歧义核查伪造备选"
         return
-    exp_text, exp_cost, exp_del = expected
+    exp_cost, exp_text, exp_del_raw = expected_plans[0]
+    exp_del = exp_del_raw if exp_del_raw >= 0 else None
     assert got is not None, f"{chars=} {locked=} 应有解 {exp_text}，DP 返回 None"
     text, pairs, deleted = got
     assert text == exp_text, (
@@ -64,6 +69,47 @@ def check_case(chars, locked):
     assert not stack
     assert pairs == sorted(derived)
     assert sorted(p for pair in pairs for p in pair) == kept
+
+    first_text, first_pairs, first_deleted, plans = ambiguous
+    assert first_text == text
+    assert first_pairs == pairs
+    assert first_deleted == deleted
+    assert len(plans) == len(expected_plans)
+    assert [
+        (plan["repaired"], plan["deleted_index"]) for plan in plans
+    ] == [
+        (plan_text, plan_del if plan_del >= 0 else None)
+        for _, plan_text, plan_del in expected_plans
+    ]
+    assert all(plan["cost"] == exp_cost for plan in plans)
+    assert len({
+        (plan["repaired"], plan["deleted_index"]) for plan in plans
+    }) == len(plans)
+    for plan, (plan_cost, plan_text, plan_del_raw) in zip(
+        plans, expected_plans
+    ):
+        plan_del = plan_del_raw if plan_del_raw >= 0 else None
+        assert plan["repaired"] == plan_text
+        assert plan["cost"] == plan_cost
+        assert plan["deleted_index"] == plan_del
+        if plan_del is not None:
+            assert not locked[plan_del]
+        plan_kept = [i for i in range(n) if i != plan_del]
+        stack = []
+        derived = []
+        for idx, ch in enumerate(plan_text):
+            if ch in OPEN_TO_CLOSE:
+                stack.append(idx)
+            else:
+                o = stack.pop()
+                assert OPEN_TO_CLOSE[plan_text[o]] == ch
+                derived.append([plan_kept[o], plan_kept[idx]])
+        assert not stack
+        assert plan["pairs"] == sorted(derived)
+        assert sorted(p for pair in plan["pairs"] for p in pair) == plan_kept
+        for p, i in enumerate(plan_kept):
+            if locked[i]:
+                assert plan_text[p] == chars[i]
 
 
 @pytest.mark.parametrize("n", [3, 4])
@@ -178,6 +224,66 @@ class TestNoRepair:
         # 偶数长度已合法：零修改，不删除
         assert run("()()", [True] * 4) == ("()()", [[0, 1], [2, 3]], None)
         assert run("()()") == ("()()", [[0, 1], [2, 3]], None)
+
+
+class TestAmbiguity:
+    def test_same_text_different_deleted_positions_are_distinct(self):
+        # 结果同为 "()"，删 0 与删 1 是两个互异方案；必须保留原稿删位
+        _, _, _, plans = run("(()", check_ambiguity=True)
+        assert plans == [
+            {
+                "cost": 1,
+                "repaired": "()",
+                "pairs": [[1, 2]],
+                "deleted_index": 0,
+            },
+            {
+                "cost": 1,
+                "repaired": "()",
+                "pairs": [[0, 2]],
+                "deleted_index": 1,
+            },
+        ]
+
+    def test_same_text_replacement_coordinates_follow_deleted_position(self):
+        # "((("：删 0 时替换原稿 1；删 1 时替换原稿 2，配对坐标也不同
+        _, _, _, plans = run("(((", check_ambiguity=True)
+        assert plans[0]["deleted_index"] == 0
+        assert plans[0]["pairs"] == [[1, 2]]
+        assert plans[1]["deleted_index"] == 1
+        assert plans[1]["pairs"] == [[0, 2]]
+        assert all(plan["repaired"] == "()" for plan in plans)
+        assert all(plan["cost"] == 2 for plan in plans)
+
+    def test_text_order_before_delete_index(self):
+        _, _, _, plans = run("})()(", check_ambiguity=True)
+        assert [(p["repaired"], p["deleted_index"]) for p in plans][0] == (
+            "()()",
+            4,
+        )
+
+    def test_locked_conflict_makes_delete_alternative_unavailable(self):
+        # 首删位锁定后，同串备选只剩删除下标 1；不能伪造锁定删位方案
+        _, _, _, plans = run(
+            "(()", [True, False, False], check_ambiguity=True
+        )
+        assert [plan["deleted_index"] for plan in plans] == [1]
+
+    def test_unique_no_deletion_for_even_valid(self):
+        _, _, deleted, plans = run(
+            "()()", [True] * 4, check_ambiguity=True
+        )
+        assert deleted is None
+        assert len(plans) == 1
+        assert plans[0] == {
+            "cost": 0,
+            "repaired": "()()",
+            "pairs": [[0, 1], [2, 3]],
+            "deleted_index": None,
+        }
+
+    def test_no_repair_has_no_alternative(self):
+        assert run("(((", [True] * 3, check_ambiguity=True) is None
 
 
 class TestPerformance:

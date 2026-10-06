@@ -45,8 +45,19 @@ def brute_force(
     chars: Sequence[str], locked: Sequence[bool]
 ) -> Optional[Tuple[str, int]]:
     """返回 (最优修复串, 修改数)，无解返回 None。"""
+    plans = brute_force_plans(chars, locked)
+    if not plans:
+        return None
+    cost, text = plans[0]
+    return text, cost
+
+
+def brute_force_plans(
+    chars: Sequence[str], locked: Sequence[bool]
+) -> List[Tuple[int, str]]:
+    """枚举全部合法串，返回最小修改数下按结果串排序的前两个互异方案。"""
     n = len(chars)
-    best: Optional[Tuple[str, int]] = None
+    best: List[Tuple[int, str]] = []
     for target in all_balanced(n):
         cost = 0
         feasible = True
@@ -58,9 +69,13 @@ def brute_force(
                 cost += 1
         if not feasible:
             continue
-        if best is None or cost < best[1] or (cost == best[1] and target < best[0]):
-            best = (target, cost)
-    return best
+        candidate = (cost, target)
+        if all(existing[1] != target for existing in best):
+            best.append(candidate)
+            best.sort()
+            best = best[:2]
+    minimum = best[0][0] if best else None
+    return [candidate for candidate in best if candidate[0] == minimum]
 
 
 def brute_force_redundant(
@@ -72,8 +87,19 @@ def brute_force_redundant(
     不可能合法，只允许不删。并列先取修复串字典序最小，再取被删下标
     最小。无解返回 None。
     """
+    plans = brute_force_redundant_plans(chars, locked)
+    if not plans:
+        return None
+    cost, text, deleted = plans[0]
+    return text, cost, (deleted if deleted >= 0 else None)
+
+
+def brute_force_redundant_plans(
+    chars: Sequence[str], locked: Sequence[bool]
+) -> List[Tuple[int, str, int]]:
+    """返回最小修改数下按 (修复串, 删位) 排序的前两个互异方案。"""
     n = len(chars)
-    best: Optional[Tuple[int, str, int]] = None
+    best: List[Tuple[int, str, int]] = []
     deletions = (-1,) if n % 2 == 0 else range(n)
     for m in deletions:
         if m >= 0 and locked[m]:
@@ -90,10 +116,13 @@ def brute_force_redundant(
                     cost += 1
             if not feasible:
                 continue
-            cand = (cost + (m >= 0), target, m)
-            if best is None or cand < best:
-                best = cand
-    if best is None:
-        return None
-    cost, text, m = best
-    return text, cost, (m if m >= 0 else None)
+            candidate = (cost + (m >= 0), target, m)
+            if all(
+                (existing[1], existing[2]) != (target, m)
+                for existing in best
+            ):
+                best.append(candidate)
+                best.sort()
+                best = best[:2]
+    minimum = best[0][0] if best else None
+    return [candidate for candidate in best if candidate[0] == minimum]
